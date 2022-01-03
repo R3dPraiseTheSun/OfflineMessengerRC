@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
 
 /* portul folosit */
 
@@ -16,12 +17,20 @@
 
 extern int errno;		/* eroarea returnata de unele apeluri */
 
+static volatile int keepRunning = 1;
+
 struct clientDetails{
   int descriptor;
   char nume[50];
   int logat;
   int folosit;
 };
+struct message{
+  char content[1024];
+  char sender[50];
+  unsigned long id;
+};
+long global_id=0;
 
 void printClientStatsDebug(int client_servit);
 int fetchMessage(int fd);
@@ -30,8 +39,28 @@ int Login(char * username, int client_servit);
 void loginClient(char * username, int client_servit);
 void disconnectClient(int client_servit);
 int SendMessage(char * senderName, char * destination, char * message);
-void saveChat(char *user1, char *user2, char *message);
+void saveChat(char *user1, char *user2, struct message messageStruct);
+void ReplyMessage(char *user1, char *user2, char *id, char *repliedMessage);
+void ShowHistory();
+void saveGlobalCount();
+void readGlobalCount();
+struct message getMessageData(char *user1, char *user2, char *id);
+void revstr(char *str1);
 
+void  INThandler(int sig)
+{
+  char  c;
+
+  signal(sig, SIG_IGN);
+  printf("OUCH, did you hit Ctrl-C?\n"
+        "Do you really want to quit? [y/n] ");
+  c = getchar();
+  if (c == 'y' || c == 'Y')
+      exit(0);
+  else
+      signal(SIGINT, INThandler);
+  getchar(); // Get new line character
+}//https://stackoverflow.com/questions/4217037/catch-ctrl-c-in-c
 
 /* functie de convertire a adresei IP a clientului in sir de caractere */
 char * conv_addr (struct sockaddr_in address)
@@ -51,9 +80,38 @@ struct clientDetails clientDet[100];
 int nrClienti = 0;
 char parameter[50];
 
+void* create_shared_memory(size_t size) {
+  // Our memory buffer will be readable and writable:
+  int protection = PROT_READ | PROT_WRITE;
+
+  // The buffer will be shared (meaning other processes can access it), but
+  // anonymous (meaning third-party processes cannot obtain an address for it),
+  // so only this process and its children will be able to use it:
+  int visibility = MAP_SHARED | MAP_ANONYMOUS;
+
+  // The remaining parameters to `mmap()` are not important for this use case,
+  // but the manpage for `mmap` explains their purpose.
+  return mmap(NULL, size, protection, visibility, -1, 0);
+}//https://stackoverflow.com/questions/5656530/how-to-use-shared-memory-with-linux-in-c
+
+struct clientDetails*  shmem;
+fd_set readfds;		/* multimea descriptorilor de citire */
+fd_set actfds;		/* multimea descriptorilor activi */
+
+int sd, client;		/* descriptori de socket */
+int optval=1; 			/* optiune folosita pentru setsockopt()*/ 
+int fd;			/* descriptor folosit pentru 
+          parcurgerea listelor de descriptori */
+int nfds;			/* numarul maxim de descriptori */
+
 /* programul */
 int main ()
 {
+  global_id=(long)create_shared_memory(sizeof(long));
+  shmem = (struct clientDetails*)create_shared_memory(100 * sizeof(struct clientDetails));
+  memcpy(shmem, clientDet, 100*sizeof(struct clientDetails));
+
+  readGlobalCount();
   /*Detalii despre clientii care o sa se conecteze*/
   
   bzero(clientDet,100);
@@ -65,14 +123,8 @@ int main ()
   }
   struct sockaddr_in server;	/* structurile pentru server si clienti */
   struct sockaddr_in from;
-  fd_set readfds;		/* multimea descriptorilor de citire */
-  fd_set actfds;		/* multimea descriptorilor activi */
+ 
   struct timeval tv;		/* structura de timp pentru select() */
-  int sd, client;		/* descriptori de socket */
-  int optval=1; 			/* optiune folosita pentru setsockopt()*/ 
-  int fd;			/* descriptor folosit pentru 
-				   parcurgerea listelor de descriptori */
-  int nfds;			/* numarul maxim de descriptori */
   int len;			/* lungimea structurii sockaddr_in */
 
   /* creare socket */
@@ -121,6 +173,7 @@ int main ()
   fflush (stdout);
   
   /* servim in mod concurent clientii... */
+  signal(SIGINT, INThandler);
   while (1)
   {
     /* ajustam multimea descriptorilor activi (efectiv utilizati) */
@@ -169,6 +222,7 @@ int main ()
           close(client);
         } 
       }
+      memcpy(shmem, clientDet, 100*sizeof(struct clientDetails));
       printf("[server] S-a conectat clientul cu descriptorul %d, de la adresa %s.\n",client, conv_addr (from));
       fflush (stdout);
     }
@@ -198,7 +252,7 @@ int fetchMessage(int fd)
   char buffer[1024];		/* mesajul */
   int bytes = 0;			/* numarul de octeti cititi/scrisi */
   char msg[1024];		//mesajul primit de la client 
-  char msgrasp[1078]=" ";        //mesaj de raspuns pentru client
+  char msgrasp[1200]=" ";        //mesaj de raspuns pentru client
   int clientulServit;
   bzero(buffer,1024); bzero(msg,1024), bzero(msgrasp,1078);
 
@@ -222,14 +276,14 @@ int fetchMessage(int fd)
       printf("Clientul %s incearca sa se logheze!\n",msg + strlen("/login "));
       if(Login(msg + strlen("/login "), clientulServit))
       {
-        bzero(msgrasp,1078);
+        bzero(msgrasp,1200);
         sprintf(msgrasp,"Utilizatorul %s s-a logat cu succes!\n", clientDet[clientulServit].nume);
         if(write(clientDet[clientulServit].descriptor,msgrasp,sizeof(msgrasp)) <= 0){
           perror("write catre client error\n"); return 0;
         }
       }
       else{
-        bzero(msgrasp,1078);
+        bzero(msgrasp,1200);
         sprintf(msgrasp,"Utilizatorul %s nu s-a logat corect!\n", clientDet[clientulServit].nume);
         if(write(clientDet[clientulServit].descriptor,msgrasp,sizeof(msgrasp)) <= 0){
           perror("write catre client error\n"); return 0;
@@ -253,10 +307,38 @@ int fetchMessage(int fd)
       printf("parametri: %s\ndestinatar: %s\n", parametri, destinatar);
       SendMessage(clientDet[clientulServit].nume, destinatar, parametri + strlen(destinatar) + 1);
     } 
+    if(strstr(msg,"reply")!=NULL){
+      char parametri[1500] = " ";
+      char gotId[10];
+      strcpy(parametri,msg+strlen("/reply "));
+      //printf("REPLY ACTIVAT!!!\nparams:%s\n",parametri);
+      char destinatar[50] = " ";
+      int j=0;
+      for(int i=0;i<strlen(parametri);i++){
+        if(parametri[i]==' ')  break;
+        destinatar[j] = parametri[i];
+        j++;
+      }
+      j=0;
+      //printf("Dest:%s\n",destinatar);
+      //printf("param after dest:%s\n",parametri+strlen(destinatar)+1);
+      for(int i=strlen(destinatar)+1;i<strlen(parametri)+1;i++){
+        if(parametri[i]==' ')  break;
+        gotId[j] = parametri[i];
+        j++;
+      }
+      //printf("Id:%s\n",gotId);
+      //printf("params after id:%s\n",parametri+strlen(destinatar)+strlen(gotId)+2);
+      ReplyMessage(clientDet[clientulServit].nume,destinatar,gotId,parametri+strlen(destinatar)+strlen(gotId)+2);
+    }
+    if(strstr(msg,"debug")!=NULL){
+      printf("DebugStuff!!\n");
+      getMessageData("paul","andrei","2");
+    }
   } 
   else{
-    bzero(msgrasp,1078);
-    printClientStatsDebug(clientulServit);
+    bzero(msgrasp,1200);
+    //printClientStatsDebug(clientulServit);
     sprintf(msgrasp,"%s:%s\n", clientDet[clientulServit].nume,msg);
     for(int i=0;i<100;i++){
       if(clientDet[i].folosit==1){
@@ -271,11 +353,13 @@ int fetchMessage(int fd)
 
 void disconnectClient(int client_servit){
   clientDet[client_servit].logat=0;
+  memcpy(shmem, clientDet, 100*sizeof(struct clientDetails));
 }
 
 void loginClient(char * username, int client_servit){
   clientDet[client_servit].logat=1;
   strcpy(clientDet[client_servit].nume,username);
+  memcpy(shmem, clientDet, 100*sizeof(struct clientDetails));
 }
 
 void printClientStatsDebug(int client_servit){
@@ -283,18 +367,17 @@ void printClientStatsDebug(int client_servit){
 }
 
 int Login(char * username, int client_servit){
-  printf("Logging in user: \"%s\"...\nSearching for username...\n", username);
+  //printf("Logging in user: \"%s\"...\nSearching for username...\n", username);
   FILE *usr = fopen("users.cfg","r");
   char line[10];
   if(!usr) {
     perror("[Error]User file is NULL\n");
     exit(0);
   }
-  printf("Looking into the file...\n");
+  //printf("Looking into the file...\n");
   while(fgets(line,sizeof(line),usr))
   {
     line[strlen(line)-1] = '\0';
-    printf("%s\n", line);
     if(strcmp(username,line) == 0)
     {
       printf("Found the user...\nLoging in...\n");
@@ -310,14 +393,14 @@ int Login(char * username, int client_servit){
   return 0;
 }
 void Register(char * username){
-  printf("Registering user: \"%s\"...\n", username);
+  //printf("Registering user: \"%s\"...\n", username);
   FILE *usr = fopen("users.cfg","r");
   char line[10];
   if(!usr) {
     perror("[Error]User file is NULL\n");
     exit(0);
   }
-  printf("Looking into the file...\n");
+  //printf("Looking into the file...\n");
   while(fgets(line,sizeof(line),usr))
   {
     line[strlen(line)-1] = '\0';
@@ -334,40 +417,36 @@ void Register(char * username){
 }
 
 int SendMessage(char * senderName, char * destination, char * message){
-  char messageRasp[1030] = " ";
-  sprintf(messageRasp,"%s:%s",senderName,message);
-  saveChat(senderName, destination, messageRasp);
+  char messageRasp[1200] = " ";
+  struct message messageStruct;
+  messageStruct.id=++global_id; saveGlobalCount();
+  strcpy(messageStruct.content,message);
+  strcpy(messageStruct.sender,senderName);
+  sprintf(messageRasp,"<<%s>>:%s",messageStruct.sender,messageStruct.content);
+  saveChat(senderName, destination, messageStruct);
   int destinationDesc;
-  /*pid_t asteapta=fork();
+  pid_t asteapta=fork();
   if(asteapta==-1){perror("[Server] Eroare in fork()!\n"); return errno;}
   else if(asteapta==0){
-    int logat=0;
-    while(!logat){
-      sleep(10);
+    while(1){
       for(int i=0;i<100;i++){
-        if(strcmp(clientDet[i].nume,destination)==0){
-        printf("[Server]S-a logat %s\n",destination);
-        logat=1;
+        if(strcmp(shmem[i].nume,destination)==0){
+          if(write(shmem[i].descriptor,messageRasp,strlen(messageRasp))<=0){
+            perror("Write error catre client!\n");
+            return 2;
+            }//tell the client to look into history
+          return 1;
         }
       }
-      printf("[Server]Inca il astept pe %s sa se logheze\n",destination);
+      sleep(1);
     }
-    return 0;
   }
-  else{
-    wait(0);*/
-    for(int i=0;i<100;i++){
-      if(strcmp(clientDet[i].nume,destination)==0){
-        destinationDesc = clientDet[i].descriptor;
-      }
-    }
-    if(write(destinationDesc,messageRasp,strlen(messageRasp))<=0){perror("Write error catre client!\n"); return 0;}
-  //}
-  return 1;
 }
 
-void saveChat(char *user1, char *user2, char *message){
+void saveChat(char *user1, char *user2, struct message messageStruct){
   char filename[128];
+  char message[1300];
+  sprintf(message,"(%ld)<<%s>>%s",messageStruct.id,messageStruct.sender,messageStruct.content);
   sprintf(filename,"%s&%sChat",user1,user2);
   if(access(filename,F_OK) != 0){
     sprintf(filename,"%s&%sChat",user2,user1);
@@ -379,4 +458,147 @@ void saveChat(char *user1, char *user2, char *message){
   FILE *chat = fopen(filename,"a+");
   fprintf(chat,"%s\n",message);
   fclose(chat);
+}
+
+void ReplyMessage(char *user1, char *user2, char *id, char *repliedMessage){
+  char messageReply[1300];
+  struct message replyTo = getMessageData(user1,user2,id);
+  sprintf(messageReply,"Replied to <<%s>>%s: %s\n",replyTo.sender, replyTo.content, repliedMessage);
+  SendMessage(user1,user2,messageReply);
+}
+
+void saveGlobalCount(){
+  FILE *usr = fopen("ServerConfig.cfg","r");
+  FILE *usrtmp = fopen("tmp","w");
+  char line[30];
+  if(!usr) {
+    perror("[Error]User file is NULL\n");
+    exit(0);
+  }
+  printf("\nLooking into the file...\n");
+  while(fgets(line,sizeof(line),usr))
+  {
+    line[strlen(line)-1] = '\0';
+    printf("line:%s strstr:%s\n",line, strstr(line,"global_id_counter"));
+    if(strstr(line,"global_id_counter") != NULL)
+    {
+      printf("GLBCOUTNIS: %s and globalCount=%ld\n",line+strlen("global_id_counter = "),global_id);
+      sprintf(line, "global_id_counter = %ld",global_id);
+    }
+    fprintf(usrtmp,"%s\n",line);
+  }
+  remove("ServerConfig.cfg");
+  rename("tmp","ServerConfig.cfg");
+  fclose(usr);
+  fclose(usrtmp);
+}
+void readGlobalCount(){
+  FILE *usr = fopen("ServerConfig.cfg","r");
+  char line[30];
+
+  if(!usr) {
+      perror("[Error]User file is NULL\n");
+      exit(0);
+  }
+  printf("Looking into the file...\n");
+  while(fgets(line,sizeof(line),usr))
+  {
+    line[strlen(line)] = '\0';
+    printf("%s",line);
+    if(strstr(line,"global_id_counter") != NULL)
+    {
+      printf("DIN FISIER: %s\n",line+strlen("global_id_counter = "));
+      global_id=atoi(line+strlen("global_id_counter = "))+1;
+      printf("DIN PROGRAM:%ld\n",global_id);
+    }
+  }
+}
+
+void revstr(char *str1)  
+{  
+  // declare variable  
+  int i, len, temp;  
+  len = strlen(str1); // use strlen() to get the length of str string  
+    
+  // use for loop to iterate the string   
+  for (i = 0; i < len/2; i++)  
+  {  
+    // temp variable use to temporary hold the string  
+    temp = str1[i];  
+    str1[i] = str1[len - i - 1];  
+    str1[len - i - 1] = temp;  
+  }  
+}  
+
+struct message getMessageData(char *user1, char *user2, char *id){
+  struct message replyTo;
+  char filename[128], len[128], message[128], gotId[10], messageReply[1300];
+  char gotUser[50];
+  int ch, i;
+  int count;
+
+  sprintf(filename,"%s&%sChat",user1,user2);
+  if(access(filename,F_OK) != 0){
+    sprintf(filename,"%s&%sChat",user2,user1);
+    if(access(filename,F_OK) != 0){
+      printf("[Server]File does not exist!\n");
+      sprintf(filename,"%s&%sChat",user1,user2);
+    }
+  }
+  printf("filename:%s\n",filename);
+  FILE *fd = fopen(filename,"a+");
+  //from https://hplusacademy.com/print-contents-of-file-in-reverse-order-in-c/
+fseek(fd, 0, SEEK_END);
+while (ftell(fd) > 1 ){
+    fseek(fd, -2, SEEK_CUR);
+    if(ftell(fd) <= 2)
+      break;
+    ch =fgetc(fd);
+    count = 0;
+    while(ch != '\n'){
+      len[count++] = ch;
+      if(ftell(fd) < 2)
+              break;
+      fseek(fd, -2, SEEK_CUR);
+      ch =fgetc(fd);
+    }
+    int k=0;
+    for (i =count -1 ; i >= 0 && count > 0  ; i--)
+    {
+      if(len[i]=='('){
+        k=0;
+        while(len[i--]!=')'){
+          gotId[k++]=len[i];
+          if(len[i-1]==')')
+            break;
+        }
+        k=0;
+        if(strcmp(gotId,id)==0){
+          i-=2;
+          while(i>=0 && count>0)
+          {
+            message[k++]=len[i--];
+          }
+          i=count=0;
+        }
+      }
+    }
+    //revstr(len);
+    //printf("%s\n", len);
+  }
+  printf("ID:%s\n",id);
+  replyTo.id=(unsigned long)(id - '0');
+  int k=0;
+  i=2;
+  while(message[i]!='<'){
+    gotUser[k++]=message[i++];
+    if(message[i+1]=='>'){gotUser[k]=message[i]; break;}
+  }
+  printf("GotUser:%s\n",gotUser);
+  strcpy(replyTo.sender,gotUser);
+  printf("Message:%s\n",message+strlen(gotUser)+4);
+  strcpy(replyTo.content,message+strlen(gotUser)+4);
+
+  return replyTo;
+  fclose(fd);
 }
