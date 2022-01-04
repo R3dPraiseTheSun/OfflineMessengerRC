@@ -41,7 +41,7 @@ void disconnectClient(int client_servit);
 int SendMessage(char * senderName, char * destination, char * message);
 void saveChat(char *user1, char *user2, struct message messageStruct);
 void ReplyMessage(char *user1, char *user2, char *id, char *repliedMessage);
-void ShowHistory();
+void ShowHistory(char *user1, int U1Desc, char *user2);
 void saveGlobalCount();
 void readGlobalCount();
 struct message getMessageData(char *user1, char *user2, char *id);
@@ -239,7 +239,6 @@ int main ()
           nrClienti--;
           close (fd);		/* inchidem conexiunea cu clientul */
           FD_CLR (fd, &actfds);/* scoatem si din multime */
-          return 0;
         }
       }
     }
@@ -331,9 +330,21 @@ int fetchMessage(int fd)
       //printf("params after id:%s\n",parametri+strlen(destinatar)+strlen(gotId)+2);
       ReplyMessage(clientDet[clientulServit].nume,destinatar,gotId,parametri+strlen(destinatar)+strlen(gotId)+2);
     }
+    if(strstr(msg,"history")!=NULL){
+      char parametri[1500] = " ";
+      strcpy(parametri,msg+strlen("/history "));
+      char destinatar[50] = " ";
+      int j=0;
+      for(int i=0;i<strlen(parametri);i++){
+        if(parametri[i]==' ')  break;
+        destinatar[j] = parametri[i];
+        j++;
+      }
+      ShowHistory(clientDet[clientulServit].nume, clientDet[clientulServit].descriptor, destinatar);
+    }
     if(strstr(msg,"debug")!=NULL){
       printf("DebugStuff!!\n");
-      getMessageData("paul","andrei","2");
+      //getMessageData("paul","andrei","2");
     }
   } 
   else{
@@ -601,4 +612,30 @@ while (ftell(fd) > 1 ){
 
   return replyTo;
   fclose(fd);
+}
+
+void ShowHistory(char *user1, int U1Desc, char *user2){
+  char filename[128], line[1300];
+  sprintf(filename,"%s&%sChat",user1,user2);
+  if(access(filename,F_OK) != 0){
+    sprintf(filename,"%s&%sChat",user2,user1);
+    if(access(filename,F_OK) != 0){
+      printf("[Server]File does not exist!\n");
+      sprintf(filename,"%s&%sChat",user1,user2);
+    }
+  }
+  printf("filename:%s\n",filename);
+  FILE *fd = fopen(filename,"r");
+
+  pid_t historyChild=fork();
+  if(historyChild == -1) {perror("[Server]history child error!"); return;}
+  else if(historyChild == 0){
+    while(fgets(line,sizeof(line),fd)){
+      line[strlen(line)-1] = '\0';
+      printf("%s\n",line);
+      write(U1Desc,line,strlen(line));
+      strcpy(line," ");
+    }
+    return;
+  }
 }

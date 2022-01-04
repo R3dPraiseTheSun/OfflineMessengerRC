@@ -1,29 +1,42 @@
-/* cliTCP.c - Exemplu de client TCP 
-   Trimite un nume la server; primeste de la server "Hello nume".
-         
-   Autor: Lenuta Alboaie  <adria@infoiasi.ro> (c)2009
-
-*/
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
-#include <errno.h>
 #include <unistd.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <netdb.h>
-#include <string.h>
 #include <arpa/inet.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <sys/mman.h>
 
 /* codul de eroare returnat de anumite apeluri */
 extern int errno;
+
+int sd;			// descriptorul de socket
+static volatile int keepRunning = 1;
+
+void  INThandler(int sig)
+{
+  char  c;
+
+  signal(sig, SIG_IGN);
+  printf("OUCH, did you hit Ctrl-C?\nDo you really want to quit? [y/n]");
+  c = getchar();
+  if (c == 'y' || c == 'Y'){
+    keepRunning = 0;
+  }
+  else
+      signal(SIGINT, INThandler);
+  getchar(); // Get new line character
+}//https://stackoverflow.com/questions/4217037/catch-ctrl-c-in-c
 
 /* portul de conectare la server*/
 int port;
 
 int main (int argc, char *argv[])
 {
-  int sd;			// descriptorul de socket
   struct sockaddr_in server;	// structura folosita pentru conectare 
   char msg[1024];		// mesajul trimis
 
@@ -60,13 +73,14 @@ int main (int argc, char *argv[])
     return errno;
   }
 
+  signal(SIGINT, INThandler);
   /* citirea mesajului */
   pid_t copil = fork();
   if(copil==-1){
     perror("Fork error!\n"); return errno;
   }
   else if(copil==0){
-    while(1)
+    while(keepRunning)
     {
       bzero (msg, 1024);
       fflush (stdout);
@@ -78,16 +92,22 @@ int main (int argc, char *argv[])
         perror ("[Client]Eroare la write() spre server.\n");
         return errno;
       }
+      strcpy(msg," ");
     }
+    char exitmsg[10] = "Bye bye!";
+    write(sd, exitmsg, 10);
+    return 0;
   }
   else{
-    while(1)
+    while(keepRunning)
     {
       if(read(sd,msg,1024) <=0){
         perror("[Client]Eroare la read() de la server!\n"); return errno;
       }
       printf("%s\n",msg);
+      strcpy(msg," ");
     }
+    wait(0);
   }
 
   /* inchidem conexiunea, am terminat */
