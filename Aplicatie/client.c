@@ -15,7 +15,21 @@
 extern int errno;
 
 int sd;			// descriptorul de socket
-static volatile int keepRunning = 1;
+static volatile int keepRunning=1;
+
+void* create_shared_memory(size_t size) {
+  // Our memory buffer will be readable and writable:
+  int protection = PROT_READ | PROT_WRITE;
+
+  // The buffer will be shared (meaning other processes can access it), but
+  // anonymous (meaning third-party processes cannot obtain an address for it),
+  // so only this process and its children will be able to use it:
+  int visibility = MAP_SHARED | MAP_ANONYMOUS;
+
+  // The remaining parameters to `mmap()` are not important for this use case,
+  // but the manpage for `mmap` explains their purpose.
+  return mmap(NULL, size, protection, visibility, -1, 0);
+}//https://stackoverflow.com/questions/5656530/how-to-use-shared-memory-with-linux-in-c
 
 void  INThandler(int sig)
 {
@@ -25,7 +39,11 @@ void  INThandler(int sig)
   printf("OUCH, did you hit Ctrl-C?\nDo you really want to quit? [y/n]");
   c = getchar();
   if (c == 'y' || c == 'Y'){
+    char exitmsg[10] = "/exit\n";
+    write(sd, exitmsg, 10);
     keepRunning = 0;
+    kill(0,SIGKILL);
+    exit(0);
   }
   else
       signal(SIGINT, INThandler);
@@ -39,7 +57,6 @@ int main (int argc, char *argv[])
 {
   struct sockaddr_in server;	// structura folosita pentru conectare 
   char msg[1024];		// mesajul trimis
-
   /* exista toate argumentele in linia de comanda? */
   if (argc != 3)
     {
@@ -73,13 +90,13 @@ int main (int argc, char *argv[])
     return errno;
   }
 
-  signal(SIGINT, INThandler);
   /* citirea mesajului */
   pid_t copil = fork();
   if(copil==-1){
     perror("Fork error!\n"); return errno;
   }
   else if(copil==0){
+    signal(SIGINT, INThandler);
     while(keepRunning)
     {
       bzero (msg, 1024);
@@ -87,25 +104,25 @@ int main (int argc, char *argv[])
       read (0, msg, 1024);
       
       /* trimiterea mesajului la server */
-      if (write (sd, msg, 1024) <= 0)
-      {
-        perror ("[Client]Eroare la write() spre server.\n");
-        return errno;
-      }
+      if(keepRunning)
+        if (write (sd, msg, 1024) <= 0){
+          perror ("[Client]Eroare la write() spre server.\n");
+          return errno;
+        }
       strcpy(msg," ");
     }
-    char exitmsg[10] = "Bye bye!";
-    write(sd, exitmsg, 10);
     return 0;
   }
   else{
+    signal(SIGINT, INThandler);
     while(keepRunning)
     {
-      if(read(sd,msg,1024) <=0){
-        perror("[Client]Eroare la read() de la server!\n"); return errno;
-      }
+      if(keepRunning)
+        if(read(sd,msg,sizeof(msg)) <=0){
+          perror("[Client]Eroare la read() de la server!\n"); return errno;
+        }
       printf("%s\n",msg);
-      strcpy(msg," ");
+      bzero(msg,sizeof(msg));
     }
     wait(0);
   }

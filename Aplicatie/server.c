@@ -47,21 +47,6 @@ void readGlobalCount();
 struct message getMessageData(char *user1, char *user2, char *id);
 void revstr(char *str1);
 
-void  INThandler(int sig)
-{
-  char  c;
-
-  signal(sig, SIG_IGN);
-  printf("OUCH, did you hit Ctrl-C?\n"
-        "Do you really want to quit? [y/n] ");
-  c = getchar();
-  if (c == 'y' || c == 'Y')
-      exit(0);
-  else
-      signal(SIGINT, INThandler);
-  getchar(); // Get new line character
-}//https://stackoverflow.com/questions/4217037/catch-ctrl-c-in-c
-
 /* functie de convertire a adresei IP a clientului in sir de caractere */
 char * conv_addr (struct sockaddr_in address)
 {
@@ -79,6 +64,31 @@ char * conv_addr (struct sockaddr_in address)
 struct clientDetails clientDet[100];
 int nrClienti = 0;
 char parameter[50];
+
+void  INThandler(int sig)
+{
+  char  c;
+
+  signal(sig, SIG_IGN);
+  printf("OUCH, did you hit Ctrl-C?\nDo you really want to quit? [y/n] ");
+  c = getchar();
+  if (c == 'y' || c == 'Y'){
+    char msgrasp[1300];
+    sprintf(msgrasp,"[Server]:Closing...\n");
+    for(int i=0;i<100;i++){
+      if(clientDet[i].folosit==1){
+        if(write(clientDet[i].descriptor,msgrasp,sizeof(msgrasp)) <= 0){
+          perror("write catre client error\n");
+        }
+      }
+    }
+    kill(0,SIGKILL);
+    exit(0);
+  }
+  else
+    signal(SIGINT, INThandler);
+  getchar(); // Get new line character
+}//https://stackoverflow.com/questions/4217037/catch-ctrl-c-in-c
 
 void* create_shared_memory(size_t size) {
   // Our memory buffer will be readable and writable:
@@ -342,9 +352,14 @@ int fetchMessage(int fd)
       }
       ShowHistory(clientDet[clientulServit].nume, clientDet[clientulServit].descriptor, destinatar);
     }
-    if(strstr(msg,"debug")!=NULL){
-      printf("DebugStuff!!\n");
-      //getMessageData("paul","andrei","2");
+    if(strstr(msg,"exit")!=NULL){
+      bzero(msgrasp,1200);
+      sprintf(msgrasp,"Bye bye %s!\n", clientDet[clientulServit].nume);
+      if(write(clientDet[clientulServit].descriptor,msgrasp,sizeof(msgrasp)) <= 0){
+        perror("write catre client error\n"); return 0;
+      }
+      printf("Exiting..\n");
+      return -1;
     }
   } 
   else{
@@ -473,8 +488,9 @@ void saveChat(char *user1, char *user2, struct message messageStruct){
 
 void ReplyMessage(char *user1, char *user2, char *id, char *repliedMessage){
   char messageReply[1300];
+  messageReply[strlen(messageReply)-1]='\0';
   struct message replyTo = getMessageData(user1,user2,id);
-  sprintf(messageReply,"Replied to <<%s>>%s: %s\n",replyTo.sender, replyTo.content, repliedMessage);
+  sprintf(messageReply,"Replied to <<%s>>%s: %s",replyTo.sender, replyTo.content, repliedMessage);
   SendMessage(user1,user2,messageReply);
 }
 
@@ -519,7 +535,7 @@ void readGlobalCount(){
     if(strstr(line,"global_id_counter") != NULL)
     {
       printf("DIN FISIER: %s\n",line+strlen("global_id_counter = "));
-      global_id=atoi(line+strlen("global_id_counter = "))+1;
+      global_id=atoi(line+strlen("global_id_counter = "));
       printf("DIN PROGRAM:%ld\n",global_id);
     }
   }
@@ -543,7 +559,7 @@ void revstr(char *str1)
 
 struct message getMessageData(char *user1, char *user2, char *id){
   struct message replyTo;
-  char filename[128], len[128], message[128], gotId[10], messageReply[1300];
+  char filename[128], line[1300], message[1300], gotId[10], messageReply[1300];
   char gotUser[50];
   int ch, i;
   int count;
@@ -558,57 +574,37 @@ struct message getMessageData(char *user1, char *user2, char *id){
   }
   printf("filename:%s\n",filename);
   FILE *fd = fopen(filename,"a+");
-  //from https://hplusacademy.com/print-contents-of-file-in-reverse-order-in-c/
-fseek(fd, 0, SEEK_END);
-while (ftell(fd) > 1 ){
-    fseek(fd, -2, SEEK_CUR);
-    if(ftell(fd) <= 2)
-      break;
-    ch =fgetc(fd);
-    count = 0;
-    while(ch != '\n'){
-      len[count++] = ch;
-      if(ftell(fd) < 2)
-              break;
-      fseek(fd, -2, SEEK_CUR);
-      ch =fgetc(fd);
-    }
+  while(fgets(line,sizeof(line),fd)){
+    line[strlen(line)-1]='\0';
+    printf("%s\n",line);
     int k=0;
-    for (i =count -1 ; i >= 0 && count > 0  ; i--)
-    {
-      if(len[i]=='('){
-        k=0;
-        while(len[i--]!=')'){
-          gotId[k++]=len[i];
-          if(len[i-1]==')')
-            break;
-        }
-        k=0;
-        if(strcmp(gotId,id)==0){
-          i-=2;
-          while(i>=0 && count>0)
-          {
-            message[k++]=len[i--];
-          }
-          i=count=0;
-        }
+    for(int i=0;i<strlen(line);i++){
+      if(line[i]=='('){
+        i++;
+        while(line[i]!=')') gotId[k++]=line[i++];
       }
     }
-    //revstr(len);
-    //printf("%s\n", len);
+    printf("ID:%s GotID:%s; STRCMP:%d\n",id,gotId,strcmp(id,gotId));
+    if(strcmp(id,gotId)==0) break;
   }
-  printf("ID:%s\n",id);
-  replyTo.id=(unsigned long)(id - '0');
+  strcpy(message,line);
+  printf("%s\n",message);
   int k=0;
-  i=2;
-  while(message[i]!='<'){
+  i=0;
+  while(message[i]!=')') i++;
+  i+=3;
+  while(message[i]!='>'){
     gotUser[k++]=message[i++];
-    if(message[i+1]=='>'){gotUser[k]=message[i]; break;}
   }
+  i+=2;
+  gotUser[strlen(gotUser)]='\0';
   printf("GotUser:%s\n",gotUser);
   strcpy(replyTo.sender,gotUser);
-  printf("Message:%s\n",message+strlen(gotUser)+4);
-  strcpy(replyTo.content,message+strlen(gotUser)+4);
+  printf("Message:%s\n",message+i);
+  strcpy(replyTo.content,message+i);
+
+  bzero(message,sizeof(message));
+  bzero(gotUser,sizeof(gotUser));
 
   return replyTo;
   fclose(fd);
@@ -632,9 +628,10 @@ void ShowHistory(char *user1, int U1Desc, char *user2){
   else if(historyChild == 0){
     while(fgets(line,sizeof(line),fd)){
       line[strlen(line)-1] = '\0';
-      printf("%s\n",line);
+      //printf("%s -> %ld\n",line,strlen(line));
       write(U1Desc,line,strlen(line));
-      strcpy(line," ");
+      sleep(0.2f);
+      bzero(line,sizeof(line));
     }
     return;
   }
